@@ -9,10 +9,16 @@ from nomad.datamodel.metainfo.basesections import (
     Entity,
     EntityReference,
 )
+from nomad.datamodel.results import ELN, Results
 from nomad.metainfo import MEnum, Quantity, SchemaPackage
 from nomad.metainfo.metainfo import Section, SubSection
 from nomad.units import ureg
 
+from nomad_tajine_plugin.schema_packages.foodon_lookup.foodon_lookup import (
+    get_diet_type_from_superclasses,
+    get_foodon_match,
+    get_foodon_substitutes,
+)
 from nomad_tajine_plugin.schema_packages.usda_lookup.usda_lookup import get_usda_data
 from nomad_tajine_plugin.utils import create_archive
 
@@ -34,6 +40,22 @@ m_package = SchemaPackage()
 
 def format_lab_id(lab_id: str):
     return lab_id.lower().replace(' ', '_').replace(',', '')
+
+
+def add_eln_tags(archive: 'EntryArchive', tags: list[str]):
+    """Adds tags to results.eln.tags so they show up in NOMAD's search."""
+    # results can still be None here on some reprocessing paths.
+    if not tags:
+        return
+    if archive.results is None:
+        archive.results = Results()
+    if archive.results.eln is None:
+        archive.results.eln = ELN()
+    if archive.results.eln.tags is None:
+        archive.results.eln.tags = []
+    for tag in tags:
+        if tag not in archive.results.eln.tags:
+            archive.results.eln.tags.append(tag)
 
 
 class Ingredient(Entity, Schema):
@@ -106,6 +128,23 @@ class Ingredient(Entity, Schema):
         type=int,
         a_eln=ELNAnnotation(component=ELNComponentEnum.NumberEditQuantity),
     )
+    foodon_iri = Quantity(
+        type=str,
+        description="""Matched FoodOn (https://foodon.org) class IRI for this
+            ingredient, resolved via nomad-ontology-service.""",
+        a_eln=ELNAnnotation(component=ELNComponentEnum.StringEditQuantity),
+    )
+    foodon_label = Quantity(
+        type=str,
+        description='Label of the matched FoodOn class.',
+        a_eln=ELNAnnotation(component=ELNComponentEnum.StringEditQuantity),
+    )
+    foodon_substitutes = Quantity(
+        type=str,
+        shape=['*'],
+        description="""Suggested substitutes: other FoodOn classes sharing the
+            matched class's immediate parent, e.g. other spices for a spice.""",
+    )
 
     def normalize(self, archive: 'EntryArchive', logger: 'BoundLogger'):
         if not self.lab_id:
@@ -123,6 +162,31 @@ class Ingredient(Entity, Schema):
             self.diet_type = usda_query_result.get('diet_type')
             self.fdc_id = usda_query_result.get('fdc_id')
             self.ndb_id = usda_query_result.get('ndb_id')
+
+        # Clear old values so a reprocess without a match doesn't keep them.
+        self.foodon_iri = None
+        self.foodon_label = None
+        self.foodon_substitutes = []
+
+        foodon_match = get_foodon_match(self.name)
+        if foodon_match:
+            self.foodon_iri = foodon_match['iri']
+            self.foodon_label = foodon_match['label']
+
+            foodon_diet_type = get_diet_type_from_superclasses(foodon_match['iri'])
+            if foodon_diet_type:
+                self.diet_type = foodon_diet_type
+
+            self.foodon_substitutes = get_foodon_substitutes(
+                foodon_match['iri'], foodon_match['label']
+            )
+
+        tags = []
+        if self.diet_type:
+            tags.append(f'diet:{self.diet_type}')
+        if self.foodon_label:
+            tags.append(f'foodon:{self.foodon_label}')
+        add_eln_tags(archive, tags)
 
         super().normalize(archive, logger)
 
@@ -612,6 +676,11 @@ class Recipe(BaseSection, Schema):
             self.diet_type = 'vegetarian'
         else:
             self.diet_type = 'ambiguous'
+
+        tags = [f'diet:{self.diet_type}']
+        if self.cuisine:
+            tags.append(f'cuisine:{self.cuisine}')
+        add_eln_tags(archive, tags)
 
         self.generate_description()
 
