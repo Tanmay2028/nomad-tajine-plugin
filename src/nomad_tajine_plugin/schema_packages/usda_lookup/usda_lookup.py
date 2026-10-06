@@ -67,7 +67,7 @@ def get_usda_data(
     search_params = {
         'query': ingredient_name,
         'dataType': ['SR Legacy'],
-        'pageSize': 1000,
+        'pageSize': 1,
         'api_key': usda_api_key,
     }
 
